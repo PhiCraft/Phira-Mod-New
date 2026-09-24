@@ -1,0 +1,87 @@
+// Phira（改版）Android 外壳
+//
+// 说明：官方的 Android 外壳仓库里没有，这里是照着 miniquad 的 android 模板 +
+// phira 自己导出的 JNI 符号（Java_quad_1native_QuadNative_*）拼出来的最小可用版本。
+//
+// Rust 侧（libphira.so）由 CI 用 cargo-ndk 编好放进 app/src/main/jniLibs/arm64-v8a/，
+// 游戏资源（assets/*）由 CI 复制到 app/src/main/assets/。
+
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "org.flos.phira.modded"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "org.flos.phira.modded"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.8.2"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    signingConfigs {
+        release {
+            storeFile file("../keystore.jks")
+            storePassword "phiramod"
+            keyAlias "phiramod"
+            keyPassword "phiramod"
+            storeType "PKCS12"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+
+    lint {
+        // release 构建默认会跑 lintVitalRelease，一旦有 Fatal 级问题整个构建就失败。
+        // 这个壳是自己的，不需要 lint 把关（省得白烧一次 CI）。
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
+
+dependencies {
+    // 输入框（Rust 的 inputbox crate 会 find_class "moe/mivik/inputbox/InputBox"）
+    // 现在是 app/src/main/java/moe/mivik/inputbox/InputBox.java 自己实现的，
+    // 只用系统控件，所以它不需要任何外部依赖。
+    //
+    // 原来这里挂的是 inputbox-0.1.4.aar（flatDir 本地引入）+ kotlin-stdlib + androidx.startup。
+    // 坑就在 flatDir：本地 AAR **不会**带传递依赖，而那个 AAR 内部用的是
+    // androidx.appcompat.app.AlertDialog 和 com.google.android.material.textfield.TextInputEditText——
+    // 两个类都不在包里，于是任何一次文本输入（登录、改昵称、搜索……）都会
+    // NoClassDefFoundError 闪退。自己实现既省掉 material/appcompat 的体积，
+    // 也不用把主题改成 Theme.MaterialComponents。
+
+    // rustls-platform-verifier 的 Android 组件（来自 android/local-maven，见那里的 README）。
+    // Rust 侧 reqwest 的 rustls 后端在安卓上做证书校验时，会
+    // load_class("org/rustls/platformverifier/CertificateVerifier") 并调用
+    // CertificateVerifier.verifyCertificateChain(...)。这个 Kotlin 组件必须真的进 APK，
+    // 否则每一次 HTTPS 请求都会失败 —— 表现是登录页一直提示
+    // 「获取服务条款和隐私政策内容失败」，而且启动时没有任何征兆。
+    // 版本必须与 Cargo.lock 里的 rustls-platform-verifier-android 一致（CI 会校验）。
+    implementation "rustls:rustls-platform-verifier:0.1.1"
+    // 上面那个组件是 Kotlin 写的（kotlin.Lazy / kotlin.Pair / kotlin.jvm.internal.Intrinsics）
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:1.9.24"
+}

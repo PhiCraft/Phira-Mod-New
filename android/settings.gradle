@@ -1,0 +1,25 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        // 本地 Maven 仓库（见 local-maven/README.md）。注意：**不要**改成 flatDir ——
+        // flatDir 不会解析 AAR 的依赖声明，之前 inputbox AAR 就是这么闪退的。
+        // 这里放的是 rustls-platform-verifier 的 Android 组件，Rust 侧做 TLS
+        // 证书校验时会 load_class("org/rustls/platformverifier/CertificateVerifier")，
+        // 缺了它所有 HTTPS 请求都会失败（表现：登录页一直「获取服务条款和隐私政策内容失败」）。
+        maven {
+            url = new File(rootDir, "local-maven").toURI()
+        }
+    }
+}
+
+rootProject.name = "phira"
+include ":app"

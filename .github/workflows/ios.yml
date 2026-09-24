@@ -1,0 +1,362 @@
+name: Build iOS IPA
+
+# 手动触发：仓库页面 Actions -> Build iOS IPA -> Run workflow
+# 也可以 push tag（v*）自动触发
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_target:
+        description: "最低 iOS 版本（12.0 起；构建已固定用 Xcode 15.4，它支持到 12.0）"
+        required: false
+        default: "12.0"
+      bundle_id:
+        description: "Bundle ID（必须与官方 Phira 的 org.flos.phira 不同才能共存）"
+        required: false
+        default: "org.flos.phira.mod"
+      app_name:
+        description: "显示名称（桌面图标下面的名字）"
+        required: false
+        default: "Phira Mod"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+# 同一分支/标签重复触发时自动取消旧的一次，省额度（不想要就删掉这两行）
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 关于 video 功能 / FFmpeg：
+# 上游 prpr-avc-ffmpeg 的 aarch64-apple-ios 静态库实际是 macOS 平台的对象文件，
+# 真正链接 iOS 时会报 "building for 'iOS', but linking in object file ... built for 'macOS'"，
+# 所以这里改成 --no-default-features 构建（关掉 video），完全不依赖 FFmpeg：
+# phira.xcodeproj 的 Cargo Build 阶段已加 --no-default-features，`check` job 也一致。
+# 代价：不支持谱面的 unlock 视频（代码里有 not(feature = "video") 的降级分支，功能不受影响）。
+# 想恢复 video：去掉那两个 --no-default-features，并重新加上 FFmpeg 静态库下载步骤
+# （版本与 .github/workflows/check.yml 的 PRPR_AVC_FFMPEG_VERSION 保持一致）。
+#
+# 关于共存（和官方 Phira 同时安装）：
+# 仅需 Bundle ID 不同。iOS 按 Bundle ID 分配独立的容器，数据在 <容器>/Library/data（见 phira/src/lib.rs），
+# 所以两边的登录状态、谱面、设置各自独立，不会互相覆盖。
+# Bundle ID / 显示名在 workflow_dispatch 的输入里改（默认 org.flos.phira.mod / Phira Mod）。
+
+jobs:
+  # 私有仓库里 macOS runner 按 10 倍扣分钟数，所以先跑一个便宜的 Linux 编译体检（1 倍，几分钟）。
+  # 它失败 = 代码编译不过，后面的 IPA 一定也失败；想强行跳过就把 ipa 的 needs 去掉。
+  check:
+    name: Compile check (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librust-alsa-sys-dev libglib2.0-dev libasound2t64 libatk-adaptor libgail-common libgtk-3-dev
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup show
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+
+      - name: cargo check
+        run: cargo check -p phira-main --no-default-features
+
+  ipa:
+    name: Build unsigned IPA
+    needs: check
+    # check.yml 用的是 macos-14；如果该镜像下线，改成 macos-15 / macos-latest 即可
+    runs-on: macos-14
+    env:
+      # 共存版：Bundle ID 与官方 (org.flos.phira) 不同 -> iOS 视为两个应用，
+      # 各自有独立沙盒，账号/谱面/设置互不影响，可以同时安装。
+      BUNDLE_ID: ${{ inputs.bundle_id || 'org.flos.phira.mod' }}
+      APP_DISPLAY_NAME: ${{ inputs.app_name || 'Phira Mod' }}
+      # 产物 .app 目录名（= Xcode 的 PRODUCT_NAME，没改，保持 Phira.app）
+      APP_DIR_NAME: Phira
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # macos-14 镜像默认已经是 Xcode 16.x，它对 iOS 12 这种老部署目标可能会拒绝。
+      # Xcode 15.4 明确支持部署到 iOS 12.0，所以构建前固定用它。
+      - name: Select Xcode 15.4
+        run: |
+          set -euo pipefail
+          XCODE="/Applications/Xcode_15.4.app"
+          if [ ! -d "$XCODE" ]; then
+            echo "::error::$XCODE not found on this runner image. Available:"
+            ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+          git --version
+
+      # rust-toolchain.toml 钉的是 nightly-2026-01-01，不带参数安装即按该文件解析
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add aarch64-apple-ios
+          rustup show
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: "true"
+          cache-all-crates: "true"
+
+      # 不再下载 FFmpeg：Cargo Build 阶段用 --no-default-features 关掉了 video 功能（原因见文件开头的说明）
+      - name: Verify video feature is off
+        run: grep -q -- '--no-default-features' phira.xcodeproj/project.pbxproj
+
+      # assets/font.ttf 与 assets/background.jpg 被 .gitignore 忽略、仓库里没有，
+      # 但运行时缺了会直接启动失败（lib.rs 加载 font.ttf、scene/main.rs 加载 background.jpg）。
+      # 这里优先从官方 Android APK 里提取，其次从 prpr 官方地址取字体，最后用占位图兜底。
+      - name: Prepare runtime assets (font.ttf / background.jpg)
+        run: |
+          set -euo pipefail
+          APK_URL=$(curl -fsSL \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/TeamFlos/phira/releases/latest \
+            | grep -oE '"browser_download_url":[[:space:]]*"[^"]+\.apk"' \
+            | head -n1 | sed -E 's/.*"(https:[^"]+)".*/\1/' || true)
+          if [ -n "${APK_URL:-}" ]; then
+            echo "downloading APK: $APK_URL"
+            if curl -fL --retry 3 -o phira-android.apk "$APK_URL"; then
+              for f in font.ttf background.jpg; do
+                if [ -f "assets/$f" ]; then
+                  continue
+                fi
+                ENTRY=$(unzip -Z1 phira-android.apk | grep -iE "(^|/)$f$" | head -n1 || true)
+                if [ -n "${ENTRY:-}" ]; then
+                  unzip -o -j phira-android.apk "$ENTRY" -d assets
+                  echo "extracted $ENTRY -> assets/$f"
+                fi
+              done
+              rm -f phira-android.apk
+            fi
+          fi
+          if [ ! -f assets/font.ttf ]; then
+            echo "font.ttf not found in APK, trying mivik.moe"
+            curl -fL --retry 3 -o assets/font.ttf https://mivik.moe/prpr/font.ttf
+          fi
+          if [ ! -f assets/background.jpg ]; then
+            echo "::warning::assets/background.jpg 缺失，用 assets/abstract.jpg 生成占位背景"
+            sips -s format jpeg assets/abstract.jpg --out assets/background.jpg >/dev/null
+          fi
+          ls -lh assets/font.ttf assets/background.jpg
+
+      # Xcode 工程的 INFOPLIST_FILE = phira.app/Info.plist，而 /phira.app 也在 .gitignore 里，
+      # 所以这里自己生成一份（如果你本地已经有自己的 phira.app/Info.plist，可以删掉这一步）。
+      - name: Generate phira.app/Info.plist
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "app version: $VERSION"
+          mkdir -p phira.app
+          cat > phira.app/Info.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleDevelopmentRegion</key>
+              <string>en</string>
+              <key>CFBundleDisplayName</key>
+              <string>$APP_DISPLAY_NAME</string>
+              <key>CFBundleExecutable</key>
+              <string>$APP_DIR_NAME</string>
+              <key>CFBundleIdentifier</key>
+              <string>$BUNDLE_ID</string>
+              <key>CFBundleInfoDictionaryVersion</key>
+              <string>6.0</string>
+              <key>CFBundleName</key>
+              <string>$APP_DISPLAY_NAME</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>$VERSION</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>LSRequiresIPhoneOS</key>
+              <true/>
+              <key>MinimumOSVersion</key>
+              <string>${{ inputs.deployment_target || '12.0' }}</string>
+              <key>UIRequiredDeviceCapabilities</key>
+              <array>
+                  <string>arm64</string>
+              </array>
+              <key>UILaunchStoryboardName</key>
+              <string>LaunchScreen</string>
+              <key>UISupportedInterfaceOrientations</key>
+              <array>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <key>UISupportedInterfaceOrientations~ipad</key>
+              <array>
+                  <string>UIInterfaceOrientationLandscapeLeft</string>
+                  <string>UIInterfaceOrientationLandscapeRight</string>
+              </array>
+              <!-- 让「文件」App 能看到 App 的 Documents：崩溃日志（phira-crash.log）会写一份在那里，
+                   没有 Mac / 不会用 Xcode 也能直接把日志发出来 -->
+              <key>UIFileSharingEnabled</key>
+              <true/>
+              <key>LSSupportsOpeningDocumentsInPlace</key>
+              <true/>
+              <!-- iOS 18 的游戏模式（Game Mode）：声明支持之后，系统才会把它当游戏处理，
+                   自动开启游戏模式（降低后台活动、给前台线程更高优先级，减少掉帧和输入延迟）。
+                   旧系统会忽略这个键。 -->
+              <key>LSSupportsGameMode</key>
+              <true/>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint phira.app/Info.plist
+          cat phira.app/Info.plist
+
+      # “Cargo Build” 脚本阶段会自动执行：
+      #   cargo build --bin phira-main --target aarch64-apple-ios --release --no-default-features
+      - name: Build app (xcodebuild)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project phira.xcodeproj \
+            -scheme phira \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            IPHONEOS_DEPLOYMENT_TARGET="${{ inputs.deployment_target || '12.0' }}" \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            INFOPLIST_KEY_CFBundleDisplayName="$APP_DISPLAY_NAME" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP="$RUNNER_TEMP/dd/Build/Products/Release-iphoneos/Phira.app"
+          test -d "$APP"
+
+          # 1) 主可执行文件必须是 bundle 根目录下的 $APP_DIR_NAME（也就是 Phira），
+          #    这是 iOS 和所有签名工具（Xcode / Sideloadly / AltStore / 全能签等）默认认的布局。
+          #    Xcode 会把 Rust 产物拷到 Executables/phira-main，这里改名挪到根目录并覆盖同名空壳。
+          if [ -f "$APP/Executables/phira-main" ]; then
+            mv -f "$APP/Executables/phira-main" "$APP/$APP_DIR_NAME"
+            rm -rf "$APP/Executables"
+          elif [ -f "$APP/phira-main" ]; then
+            mv -f "$APP/phira-main" "$APP/$APP_DIR_NAME"
+          fi
+          test -f "$APP/$APP_DIR_NAME"
+          chmod +x "$APP/$APP_DIR_NAME"
+          # 清掉可能残留的 phira-main（bundle 里多一个可执行文件会让签名工具漏签）
+          rm -f "$APP/phira-main"
+          file "$APP/$APP_DIR_NAME"
+
+          # 2) Info.plist 里的 CFBundleExecutable 必须与上面的文件名一致
+          EXEC_NAME=$(plutil -extract CFBundleExecutable raw "$APP/Info.plist")
+          echo "CFBundleExecutable = $EXEC_NAME"
+          if [ "$EXEC_NAME" != "$APP_DIR_NAME" ]; then
+            echo "::error::CFBundleExecutable($EXEC_NAME) 与可执行文件名($APP_DIR_NAME) 不一致"
+            exit 1
+          fi
+
+          # 3) 校验共存用的 Bundle ID / 显示名确实写进了产物
+          BUILT_ID=$(plutil -extract CFBundleIdentifier raw "$APP/Info.plist")
+          BUILT_NAME=$(plutil -extract CFBundleDisplayName raw "$APP/Info.plist" 2>/dev/null || echo "(none)")
+          echo "bundle id  : $BUILT_ID"
+          echo "display    : $BUILT_NAME"
+          if [ "$BUILT_ID" != "$BUNDLE_ID" ]; then
+            echo "::error::产物 Bundle ID 为 $BUILT_ID，期望 $BUNDLE_ID"
+            exit 1
+          fi
+          if [ "$BUILT_ID" = "org.flos.phira" ]; then
+            echo "::error::Bundle ID 与官方 Phira 相同，无法共存，请在 Run workflow 时改 bundle_id"
+            exit 1
+          fi
+
+          # 4) 清理扩展属性 / .DS_Store：否则解压出来的 IPA 可能带 __MACOSX、com.apple.* 属性，
+          #    部分签名工具会因此校验失败
+          xattr -cr "$APP" 2>/dev/null || true
+          find "$APP" -name '.DS_Store' -delete 2>/dev/null || true
+
+          echo "--- bundle root ---"
+          ls -la "$APP"
+          echo "--- bundle size ---"
+          du -sh "$APP"
+
+          # 5) 自检：在副本上模拟“第三方工具重签 + 校验”。能过说明这份 bundle 结构可被正常重签；
+          #    真正打包出去的 IPA 保持未签名（由签名工具从头签，避免旧签名残留导致校验失败）。
+          rm -rf "$RUNNER_TEMP/resign_test"
+          cp -R "$APP" "$RUNNER_TEMP/resign_test.app"
+          if codesign --force --sign - --timestamp=none "$RUNNER_TEMP/resign_test.app" 2>"$RUNNER_TEMP/cs.log" \
+             && codesign --verify --strict --verbose=2 "$RUNNER_TEMP/resign_test.app" >>"$RUNNER_TEMP/cs.log" 2>&1; then
+            echo "重签自检通过（未签名 IPA 可被第三方工具正常签名）"
+          else
+            echo "::warning::重签自检未通过，见下方日志；产物仍会导出"
+            cat "$RUNNER_TEMP/cs.log" || true
+          fi
+          rm -rf "$RUNNER_TEMP/resign_test.app"
+
+          # 6) 打包：只放 Payload/<App>.app，不带 __MACOSX / 资源叉
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          MIN_IOS=$(plutil -extract MinimumOSVersion raw "$APP/Info.plist")
+          echo "MinimumOSVersion = $MIN_IOS"
+          if [ "$MIN_IOS" != "${{ inputs.deployment_target || '12.0' }}" ]; then
+            echo "::error::产物最低系统为 $MIN_IOS，期望 ${{ inputs.deployment_target || '12.0' }}"
+            exit 1
+          fi
+          ZIP_NAME="Phira-$VERSION-ios$MIN_IOS-mod-unsigned.ipa"
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP" "Payload/$APP_DIR_NAME.app"
+          zip -qryX "$ZIP_NAME" Payload
+          rm -rf Payload
+          ls -lh "$ZIP_NAME"
+          unzip -l "$ZIP_NAME" | head -n 20
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phira-ipa
+          path: "*.ipa"
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          {
+            echo "### 构建完成 :tada:"
+            echo ""
+            echo "- 产物：\`$(ls *.ipa | head -n1)\`"
+            echo "- 最低系统：iOS ${{ inputs.deployment_target || '12.0' }}"
+            echo "- 显示名：$APP_DISPLAY_NAME"
+            echo "- Bundle ID：\`$BUNDLE_ID\`（与官方 org.flos.phira 不同，可与官方版共存）"
+            echo "- 未签名，请用 AltStore / Sideloadly / TrollStore / 自己的开发者证书签名后安装"
+            echo ""
+            echo "安装后是**独立的一个 App**：官方 Phira 的数据不受影响，共存版首次启动需要重新登录。"
+            echo ""
+            ls -lh *.ipa || true
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,19 @@
+[package]
+name = "phira-duel"
+version = "0.1.0"
+edition = "2021"
+description = "Phira 双人对战：自研协议 + 服务端（房间 / BP 选曲 / 能量制干扰 / 回合结算）"
+license = "Apache-2.0"
+
+# 独立 workspace：不并进 phira-0.8.2 主 workspace，避免打 App / CI 时被牵连；
+# 之后由开服器和客户端用 path 依赖引进来。
+[workspace]
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }

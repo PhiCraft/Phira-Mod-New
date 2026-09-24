@@ -1,0 +1,31 @@
+[package]
+name = "phira-launcher"
+version = "0.1.0"
+edition = "2021"
+description = "Phira 联机开服器：一键把家里的 PC 变成 Phira 联机服务器（IPv6 直连 + DDNS）"
+license = "Apache-2.0"
+rust-version = "1.77"
+
+# 独立 workspace：不要并进 phira-0.8.2 的 workspace，否则打 App 时会连带编译 Tauri
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "process", "macros", "io-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+anyhow = "1"
+# 双人对战服务端：同一个进程内嵌（这就是当初选 Rust 写开服器的原因）
+phira-duel = { path = "../../duel" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

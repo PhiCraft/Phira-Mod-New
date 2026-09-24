@@ -1,0 +1,126 @@
+name: Inspect official APK (Android shell contract)
+
+# 只解包、不编译：把官方 APK 当成「Android 外壳契约」的权威参照。
+#
+# 目的（排查自建壳启动闪退）：
+#   1. 官方壳（classes*.dex）到底调了哪些 native 方法 —— 我们的 libphira.so 必须都有
+#   2. 官方 libphira.so 导出的 JNI 符号 —— 和 workspace 里 Rust 侧导出的对比
+#   3. 官方 manifest / ABI / 依赖库布局 —— 自建壳照抄
+#
+# ubuntu runner 是 1 倍计费，整轮只花一两分钟，且不会因为编译失败而拿不到结果。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Dump official APK contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download official APK
+        run: |
+          set -uo pipefail
+          APK_URL=$(curl -fsSL \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/TeamFlos/phira/releases/latest \
+            | grep -oE '"browser_download_url":[[:space:]]*"[^"]+\.apk"' \
+            | head -n1 | sed -E 's/.*"(https:[^"]+)".*/\1/' || true)
+          if [ -z "${APK_URL:-}" ]; then
+            echo "::error::没能从 GitHub API 拿到官方 APK 地址"
+            exit 1
+          fi
+          echo "APK_URL=$APK_URL" >> "$GITHUB_ENV"
+          curl -fL --retry 3 -o official.apk "$APK_URL"
+          ls -lh official.apk
+          file official.apk
+
+      - name: Dump structure / manifest / libs
+        run: |
+          set -uo pipefail
+          OUT=official-apk-report.txt
+          {
+            echo "================ 官方 APK 契约报告 ================"
+            echo "URL: $APK_URL"
+            echo "SHA256: $(sha256sum official.apk | cut -d' ' -f1)"
+            echo
+            echo "---- 顶层结构 ----"
+            unzip -l official.apk | awk '{print $4}' \
+              | grep -E '^(lib/[^/]+/|assets/[^/]+$|classes[0-9]*\.dex|AndroidManifest\.xml|resources\.arsc)' \
+              | sed -E 's#^(lib/[^/]+)/.+$#\1/  (so 目录)#' | sort -u
+            echo
+            echo "---- native 库（ABI 覆盖情况）----"
+            unzip -l official.apk | awk '{print $4}' | grep -E '^lib/.*\.so$' | sort
+            echo
+            echo "---- assets 顶层条目 ----"
+            unzip -l official.apk | awk '{print $4}' | grep -E '^assets/[^/]+$' | sort | head -n 60
+            echo
+            echo "---- assets 数量统计 ----"
+            unzip -l official.apk | awk '{print $4}' | grep -cE '^assets/' || true
+            echo
+            echo "---- AndroidManifest 关键字符串（binary XML 的字符串池）----"
+            unzip -p official.apk AndroidManifest.xml | strings -e l 2>/dev/null | grep -iE 'phira|activity|screen|orientation|theme|abi|lib|permission|package' | head -n 40 || true
+            echo
+            echo "---- 官方壳调用的 native 方法（来自 classes*.dex）----"
+            rm -rf dex && mkdir -p dex
+            unzip -o -q official.apk 'classes*.dex' -d dex || true
+            cat dex/*.dex 2>/dev/null | strings \
+              | grep -oE '(setFullScreen|showKeyboard|copy|openUrl|showExportDialog|deleteUri|activityOn[A-Za-z]+|initializeContext|releaseContext|surfaceOn[A-Za-z]+|initializeEnvironment|setDataPath|setTempDir|setDpi|setChosenFile|markImport[A-Za-z]*|setInputText|startApp|prprActivityOn[A-Za-z]+|chooseFile|hykb[A-Za-z]*|processExportFd|requestFile|getNativeSurface)' \
+              | sort | uniq -c | sort -rn || true
+            echo
+            echo "---- dex 里出现的相关类名 ----"
+            cat dex/*.dex 2>/dev/null | strings | grep -E 'quad_native|QuadNative|phira' | sort -u | head -n 20 || true
+            echo
+            echo "---- 官方 native 库：依赖与导出的 JNI 符号 ----"
+            rm -rf libs && mkdir -p libs
+            unzip -o -q official.apk 'lib/*' -d libs || true
+            for SO in $(find libs/lib -name '*.so' | sort); do
+              echo "== $SO =="
+              readelf -d "$SO" | grep -E 'NEEDED|SONAME' || true
+              SYMS=$(readelf -W --dyn-syms "$SO" 2>/dev/null | grep -oE 'Java_[A-Za-z0-9_]+' | sort -u || true)
+              if [ -n "$SYMS" ]; then
+                echo "--- 导出的 Java_* 符号 ---"
+                echo "$SYMS"
+                echo "--- 其它入口符号 ---"
+                readelf -W --dyn-syms "$SO" 2>/dev/null \
+                  | grep -oE '(quad_main|JNI_OnLoad|android_main|ANativeActivity_onCreate)' | sort -u || true
+              fi
+            done
+            echo
+            echo "---- 官方 libphira.so 的导出符号总数 ----"
+            PHIRA_SO=$(find libs/lib -name 'libphira.so' | head -n1 || true)
+            if [ -n "${PHIRA_SO:-}" ]; then
+              readelf -W --dyn-syms "$PHIRA_SO" | grep -c 'FUNC' || true
+              echo "--- 全部 Java_* 符号（含非 quad_native 的）---"
+              readelf -W --dyn-syms "$PHIRA_SO" | grep -oE 'Java_[A-Za-z0-9_]+' | sort -u || true
+            else
+              echo "::warning::包里没找到 libphira.so"
+            fi
+            echo
+            echo "---- manifest 细节（有 aapt2 / apkanalyzer 就打印）----"
+            : "${ANDROID_SDK_ROOT:=/usr/local/lib/android/sdk}"
+            AAPT2=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 2>/dev/null | tail -n1 || true)
+            if [ -n "${AAPT2:-}" ]; then
+              "$AAPT2" dump badging official.apk 2>/dev/null | head -n 20 || true
+              "$AAPT2" dump xmltree --file AndroidManifest.xml official.apk 2>/dev/null \
+                | grep -iE 'activity|extractNativeLibs|screenOrientation|minSdk|targetSdk|theme|hasCode' | head -n 40 || true
+            else
+              echo "(没有 aapt2，跳过；需要 SDK 的 build-tools)"
+            fi
+          } 2>&1 | tee "$OUT"
+          {
+            echo "## 官方 APK 契约报告"
+            echo '```'
+            cat "$OUT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-apk-report
+          path: official-apk-report.txt
+          retention-days: 30

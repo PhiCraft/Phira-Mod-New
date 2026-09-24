@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phira 联机开服器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<header class="topbar glass">
+  <div class="brand">
+    <div class="logo">PH</div>
+    <div>
+      <h1>Phira 联机开服器</h1>
+      <p class="sub">IPv6 直连 + 动态域名，家里这台 PC 就是服务器</p>
+    </div>
+  </div>
+  <div class="top-actions">
+    <div id="status-pill" class="pill off"><span class="dot"></span><span id="status-text">未启动</span></div>
+    <button id="btn-start" class="btn primary">▶&nbsp; 启动服务</button>
+    <button id="btn-stop" class="btn ghost" disabled>■&nbsp; 停止</button>
+    <button id="btn-theme" class="btn ghost small" title="切换深浅色">☾</button>
+  </div>
+</header>
+
+<main>
+  <section class="grid">
+    <!-- 分享 -->
+    <div class="card glass wide hoverable">
+      <div class="card-head">
+        <h2>把这个填进 Phira 的联机服务器地址</h2>
+        <span class="hint">设置 → 联机服务器地址</span>
+      </div>
+      <div class="share">
+        <div class="share-main">
+          <code id="share-addr" class="big-addr">—</code>
+          <div class="share-btns">
+            <button id="btn-copy" class="btn">复制</button>
+            <button id="btn-qr" class="btn">显示二维码</button>
+          </div>
+        </div>
+        <div id="qr-wrap" class="qr hidden"></div>
+      </div>
+      <p class="note" id="share-note"></p>
+    </div>
+
+    <!-- 自检 -->
+    <div class="card glass hoverable">
+      <div class="card-head">
+        <h2>链路自检</h2>
+        <button id="btn-check" class="btn small">↻&nbsp; 重新检测</button>
+      </div>
+      <ul class="checklist" id="checklist">
+        <li class="check pending"><span class="mark">·</span><div><b>公网 IPv6</b><em>未检测</em></div></li>
+        <li class="check pending"><span class="mark">·</span><div><b>防火墙入站规则</b><em>未检测</em></div></li>
+        <li class="check pending"><span class="mark">·</span><div><b>端口监听</b><em>未检测</em></div></li>
+        <li class="check pending"><span class="mark">·</span><div><b>动态域名</b><em>未检测</em></div></li>
+      </ul>
+      <div class="row">
+        <button id="btn-fw" class="btn small">加防火墙规则</button>
+        <button id="btn-ddns" class="btn small">☁&nbsp; 立刻推 DNS</button>
+      </div>
+    </div>
+
+    <!-- 对战房间 -->
+    <div class="card glass hoverable">
+      <div class="card-head">
+        <h2>对战房间</h2>
+        <span class="hint">玩家在「设置 → 对战服务器」填上面那个地址</span>
+      </div>
+      <div class="room">
+        <div class="room-row">
+          <span class="room-label">房间码</span>
+          <b id="room-code" class="room-code">—</b>
+        </div>
+        <div class="room-row">
+          <span class="room-label">阶段</span>
+          <b id="room-phase">未开服</b>
+        </div>
+        <div class="room-row">
+          <span class="room-label">玩家</span>
+          <span id="room-players">—</span>
+        </div>
+        <div class="room-row">
+          <span class="room-label">比分</span>
+          <span id="room-score">—</span>
+        </div>
+        <div class="room-row">
+          <span class="room-label">曲池</span>
+          <span id="room-pool" class="room-pool">—</span>
+        </div>
+      </div>
+      <p class="note" id="room-note">开服后这里会实时显示房间状态。</p>
+    </div>
+
+    <!-- 设置 -->
+    <div class="card glass hoverable">
+      <div class="card-head"><h2>设置</h2><button id="btn-save" class="btn small">保存</button></div>
+      <label class="field"><span>端口</span><input id="in-port" type="number" min="1" max="65535" /></label>
+      <label class="field"><span>dynv6 域名</span><input id="in-domain" placeholder="myphira.dynv6.net" /></label>
+      <label class="field"><span>dynv6 token</span><input id="in-token" type="password" placeholder="在 dynv6 的域名详情页拿" /></label>
+      <label class="toggler"><input id="in-ddns" type="checkbox" /><span>每 3 分钟自动更新动态域名</span></label>
+      <label class="toggler"><input id="in-fw" type="checkbox" /><span>开服时自动加防火墙规则</span></label>
+      <p class="note">域名留空就直接用 <code>[IPv6]:端口</code> 分享（地址会变，每次要重新发）。</p>
+    </div>
+
+    <!-- 地址明细 -->
+    <div class="card glass hoverable">
+      <div class="card-head"><h2>本机 IPv6</h2><span class="hint">公网地址排前面，点击可复制</span></div>
+      <ul class="addrs" id="addrs"><li class="empty">未检测</li></ul>
+    </div>
+  </section>
+
+  <section class="card glass logs">
+    <div class="card-head"><h2>日志</h2><button id="btn-clear" class="btn small ghost">清空</button></div>
+    <div id="log" class="logbox"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
